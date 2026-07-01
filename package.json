@@ -1,0 +1,56 @@
+{
+  "name": "@avigopal/libp2p-federation-transport",
+  "version": "0.1.0",
+  "description": "libp2p Circuit Relay v2 transport for substrate federation — the reusable NAT-traversal primitive (createVesselLibp2p / serveResolveHttp / resolveViaHttp) plus a runnable ingress sidecar that makes any local HTTP vessel discovery-reachable over the relay.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "bin": {
+    "libp2p-federation-sidecar": "./src/sidecar.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "sidecar": "bun src/sidecar.ts"
+  },
+  "keywords": [
+    "libp2p",
+    "circuit-relay",
+    "nat-traversal",
+    "federation",
+    "substrate",
+    "vessel"
+  ],
+  "author": "AviGopal",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AviGopal/libp2p-federation-transport.git"
+  },
+  "dependencies": {
+    "@chainsafe/libp2p-noise": "^17.0.0",
+    "@chainsafe/libp2p-yamux": "^8.0.1",
+    "@libp2p/autonat": "^3.0.22",
+    "@libp2p/circuit-relay-v2": "^4.2.7",
+    "@libp2p/crypto": "^5.1.20",
+    "@libp2p/dcutr": "^3.0.22",
+    "@libp2p/http": "^2.0.4",
+    "@libp2p/identify": "^4.1.8",
+    "@libp2p/peer-id": "^6.0.11",
+    "@libp2p/ping": "^3.1.7",
+    "@libp2p/tcp": "^11.0.22",
+    "@libp2p/websockets": "^10.1.15",
+    "@multiformats/multiaddr": "^13.0.3",
+    "it-length-prefixed": "^11.0.1",
+    "it-pipe": "^3.0.1",
+    "libp2p": "^3.3.4",
+    "uint8arraylist": "^3.0.2",
+    "uint8arrays": "^6.1.1"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.0.0",
+    "typescript": "^5.4.0"
+  }
+}
