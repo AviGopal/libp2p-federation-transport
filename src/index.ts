@@ -76,6 +76,21 @@ async function readFrame(stream: any): Promise<string> {
   throw new Error('stream ended before a full frame arrived')
 }
 
+// libp2p v3's MessageStream.send() delivers only the FIRST ~window-frame (~1 KB) of
+// an oversized single call; the remainder is re-queued but only re-pumped when the
+// caller issues another send(). A one-shot send() of a multi-KB frame therefore
+// silently truncates (small inline replies fit the first frame and survive; larger
+// proxied bodies do not — the reader hangs / "stream ended before a full frame").
+// Chunk every framed payload to <=1 KB in a drain-aware loop so the queue re-pumps
+// each chunk. readFrame() already reassembles fragments, so this is transparent.
+const MAX_SEND = 1024
+async function sendAll(stream: any, bytes: Uint8Array): Promise<void> {
+  for (let off = 0; off < bytes.length; off += MAX_SEND) {
+    const chunk = bytes.subarray(off, Math.min(off + MAX_SEND, bytes.length))
+    if (stream.send(chunk) === false && typeof stream.onDrain === 'function') await stream.onDrain()
+  }
+}
+
 // ── The cross-substrate RESOLVE protocol (lpStream-corrected path) ──────────────────
 // The QUESTION (a pointer) crosses to the peer, the peer resolves it WHERE ITS DATA
 // LIVES, and only the RESULT comes back — over a single libp2p stream (works direct OR
@@ -98,7 +113,7 @@ export async function serveResolve(vl: VesselLibp2p, handler: (pointer: any) => 
       try {
         const pointer = JSON.parse(await readFrame(stream))   // read request (framed)
         const content = await handler(pointer)
-        stream.send(frame(JSON.stringify({ content, metadata: { shape: pointer?.type } })))
+        await sendAll(stream, frame(JSON.stringify({ content, metadata: { shape: pointer?.type } })))
         await stream.close()
       } catch { try { stream.abort?.(new Error('resolve handler error')) } catch {} }
     })()
@@ -113,7 +128,7 @@ export async function serveResolve(vl: VesselLibp2p, handler: (pointer: any) => 
 export async function resolveViaLibp2p(vl: VesselLibp2p, target: string, pointer: any): Promise<any> {
   const dialTarget = target.startsWith('/') ? multiaddr(target) : peerIdFromString(target)
   const stream = await vl.node.dialProtocol(dialTarget as any, RESOLVE_PROTO, { runOnLimitedConnection: true })
-  stream.send(frame(JSON.stringify(pointer)))              // send request, keep reading for response
+  await sendAll(stream, frame(JSON.stringify(pointer)))    // send request, keep reading for response
   const res = JSON.parse(await readFrame(stream))
   await stream.close()
   return res
