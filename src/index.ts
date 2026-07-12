@@ -275,6 +275,8 @@ export async function createVesselLibp2p(opts: VesselLibp2pOptions): Promise<Ves
   await node.start()
 
   let refreshTimer: ReturnType<typeof setInterval> | undefined
+  const assumedTtlMs = opts.assumedReservationTtlMs ?? 3_600_000
+  let lastReservationAt: number | null = null
   if (opts.relayMultiaddr) {
     const relayMa = multiaddr(opts.relayMultiaddr)
     // Dial the relay so it grants a reservation; the circuit-relay transport then
@@ -288,8 +290,7 @@ export async function createVesselLibp2p(opts: VesselLibp2pOptions): Promise<Ves
     // connection is up; this loop is the belt-and-braces re-dial that also covers the
     // case where the relay connection dropped entirely (relay restart / network blip).
     const frac = opts.reReserveAtTtlFraction ?? 0.5
-    const assumedTtlMs = opts.assumedReservationTtlMs ?? 3_600_000
-    let lastReservationAt = Date.now()
+    lastReservationAt = Date.now()
     refreshTimer = setInterval(() => {
       const relayPeer = (() => { try { return (relayMa as any).getPeerId() } catch { return null } })()
       const relayConns = relayPeer == null ? [] : node.getConnections().filter((c) => c.remotePeer.toString() === relayPeer)
@@ -299,7 +300,7 @@ export async function createVesselLibp2p(opts: VesselLibp2pOptions): Promise<Ves
       // — close + re-dial, because a dial while connected is a no-op that does not
       // re-reserve — before the assumed ttl lapses.
       const h = healthSnapshot(node)
-      const ttlMs = h.reservationTtlRemainingMs ?? Math.max(0, assumedTtlMs - (Date.now() - lastReservationAt))
+      const ttlMs = h.reservationTtlRemainingMs ?? Math.max(0, assumedTtlMs - (Date.now() - (lastReservationAt ?? Date.now())))
       if (ttlMs < frac * assumedTtlMs) {
         void Promise.allSettled(relayConns.map((c) => c.close()))
           .then(() => dialRelay())
@@ -319,7 +320,13 @@ export async function createVesselLibp2p(opts: VesselLibp2pOptions): Promise<Ves
     node,
     peerId: node.peerId.toString(),
     advertiseMultiaddrs: () => node.getMultiaddrs().map((m) => m.toString()),
-    health: () => healthSnapshot(node),
+    health: () => {
+      const h = healthSnapshot(node)
+      if (h.reservationTtlRemainingMs == null && h.activeReservations > 0 && lastReservationAt != null) {
+        h.reservationTtlRemainingMs = Math.max(0, assumedTtlMs - (Date.now() - lastReservationAt))
+      }
+      return h
+    },
     stop: async () => { if (refreshTimer) clearInterval(refreshTimer); await node.stop() },
   }
 }
