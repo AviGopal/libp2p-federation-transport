@@ -214,6 +214,7 @@ export interface VesselLibp2pOptions {
   enableHttp?: boolean             // add the @libp2p/http service (HTTP-over-libp2p path)
   disableDcutr?: boolean           // skip the DCUtR hole-punch — forces the connection to STAY relayed (test only)
   reReserveAtTtlFraction?: number  // when (fraction of ttl) remains, re-reserve (default 0.5)
+  assumedReservationTtlMs?: number // reservation ttl to assume when the relay exposes no limits (default 1h)
   extraServices?: Record<string, unknown>
 }
 
@@ -287,14 +288,22 @@ export async function createVesselLibp2p(opts: VesselLibp2pOptions): Promise<Ves
     // connection is up; this loop is the belt-and-braces re-dial that also covers the
     // case where the relay connection dropped entirely (relay restart / network blip).
     const frac = opts.reReserveAtTtlFraction ?? 0.5
+    const assumedTtlMs = opts.assumedReservationTtlMs ?? 3_600_000
+    let lastReservationAt = Date.now()
     refreshTimer = setInterval(() => {
       const relayPeer = (() => { try { return (relayMa as any).getPeerId() } catch { return null } })()
-      const connected = relayPeer != null && node.getConnections().some((c) => c.remotePeer.toString() === relayPeer)
-      if (!connected) { void dialRelay(); return }
-      // re-reserve when little ttl remains on the relayed connection
+      const relayConns = relayPeer == null ? [] : node.getConnections().filter((c) => c.remotePeer.toString() === relayPeer)
+      if (relayConns.length === 0) { void dialRelay().then(() => { lastReservationAt = Date.now() }); return }
+      // The relay cannot be observed for ttl when it applies no per-circuit limits
+      // (limits == null), so track reservation age ourselves and force a re-reservation
+      // — close + re-dial, because a dial while connected is a no-op that does not
+      // re-reserve — before the assumed ttl lapses.
       const h = healthSnapshot(node)
-      if (h.reservationTtlRemainingMs != null && h.reservationTtlRemainingMs < (opts.reReserveAtTtlFraction != null ? frac * 3600000 : 1800000)) {
-        void dialRelay()
+      const ttlMs = h.reservationTtlRemainingMs ?? Math.max(0, assumedTtlMs - (Date.now() - lastReservationAt))
+      if (ttlMs < frac * assumedTtlMs) {
+        void Promise.allSettled(relayConns.map((c) => c.close()))
+          .then(() => dialRelay())
+          .then(() => { lastReservationAt = Date.now() })
       }
     }, 30_000)
     // Re-dial promptly when the relay connection closes.
