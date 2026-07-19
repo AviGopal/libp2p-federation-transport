@@ -13,7 +13,7 @@
 //
 // Env:
 //   FED_VESSEL_ID       stable vessel id (seeds the libp2p identity + peerId)   [required]
-//   RELAY_MULTIADDR     the substrate relay's public multiaddr                  [required]
+//   RELAY_MULTIADDR     the substrate relay's public multiaddr  [optional: derived from DISCOVERY_URL /bootstrap]
 //   DISCOVERY_URL       discovery-vessel base URL to register with             [required]
 //   LOCAL_RESOLVE_URL   the local vessel's resolve endpoint to proxy to        [required]
 //   FED_SHAPES          comma-separated shapes to advertise                    [required]
@@ -26,7 +26,7 @@ import { createVesselLibp2p, serveResolveHttp, type VesselLibp2p } from './index
 
 const VESSEL_ID = process.env.FED_VESSEL_ID || ''
 const VESSEL_NAME = process.env.FED_VESSEL_NAME || VESSEL_ID
-const RELAY = process.env.RELAY_MULTIADDR || ''
+let RELAY = process.env.RELAY_MULTIADDR || ''
 const DISCOVERY = (process.env.DISCOVERY_URL || '').replace(/\/+$/, '')
 const LOCAL_RESOLVE_URL = process.env.LOCAL_RESOLVE_URL || ''
 const SHAPES = (process.env.FED_SHAPES || '').split(',').map((s) => s.trim()).filter(Boolean)
@@ -37,10 +37,30 @@ const RESOLVE_TIMEOUT_MS = parseInt(process.env.FED_RESOLVE_TIMEOUT_MS || '10000
 
 function die(msg: string): never { console.error('[fed-sidecar] ERROR:', msg); process.exit(1) }
 if (!VESSEL_ID) die('set FED_VESSEL_ID')
-if (!RELAY) die('set RELAY_MULTIADDR')
 if (!DISCOVERY) die('set DISCOVERY_URL')
 if (!LOCAL_RESOLVE_URL) die('set LOCAL_RESOLVE_URL (the local vessel /resolve to proxy to)')
 if (SHAPES.length === 0) die('set FED_SHAPES (comma-separated shapes to advertise)')
+
+// Point-and-go: with no explicit RELAY_MULTIADDR, read the relay anchor from the
+// discovery vessel's public GET /bootstrap and PREFER the p2p overlay, so the whole
+// federation config is {DISCOVERY_URL, METABOB_API_KEY} and the relay is never a
+// stale hand-copied multiaddr (law 1: read it at use time, not frozen in env). Mirror
+// of obsidian-vessel/sidecar/federation-sidecar.ts.
+if (!RELAY) {
+  try {
+    const r = await fetch(`${DISCOVERY}/bootstrap`, { signal: AbortSignal.timeout(5000) })
+    if (r.ok) {
+      const b = (await r.json()) as { relay_multiaddrs?: string[] }
+      if (b.relay_multiaddrs?.length) {
+        RELAY = b.relay_multiaddrs[0]!
+        console.log(`[fed-sidecar] relay from ${DISCOVERY}/bootstrap: ${RELAY}`)
+      }
+    }
+  } catch (e) {
+    console.warn(`[fed-sidecar] bootstrap fetch failed (${String((e as Error)?.message ?? e)})`)
+  }
+}
+if (!RELAY) die('set RELAY_MULTIADDR, or DISCOVERY_URL must expose relay_multiaddrs via /bootstrap')
 
 const vl: VesselLibp2p = await createVesselLibp2p({ vesselId: VESSEL_ID, relayMultiaddr: RELAY, enableHttp: true })
 
