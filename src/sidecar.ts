@@ -108,6 +108,8 @@ Bun.serve({
 })
 
 async function register(): Promise<void> {
+  const cur = vl.advertiseMultiaddrs().find((m) => m.includes("p2p-circuit"))
+  if (cur) circuit = cur
   try {
     const r = await fetch(DISCOVERY + '/register', {
       method: 'POST',
