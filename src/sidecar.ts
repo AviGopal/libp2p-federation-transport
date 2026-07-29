@@ -63,15 +63,38 @@ if (!RELAY) {
 if (!RELAY) die('set RELAY_MULTIADDR, or DISCOVERY_URL must expose relay_multiaddrs via /bootstrap')
 
 // Guard against unhandled libp2p errors (e.g. relay dial TimeoutError → ERR_UNHANDLED_ERROR).
-// Mirror of federation-transport-server.ts guards.
+// Mirror of federation-transport-server.ts guards — log and continue, never exit.
 process.on('uncaughtException', (err) => {
   console.error('[fed-sidecar] uncaught exception:', err)
-  process.exit(1)
+  return
 })
 process.on('unhandledRejection', (reason) => {
   console.error('[fed-sidecar] unhandled rejection:', reason)
-  process.exit(1)
+  return
 })
+
+import { multiaddr } from '@multiformats/multiaddr'
+
+const RELAY_PEER = RELAY.match(/\/p2p\/([^/]+)/)?.[1] ?? ''
+const relayConnections = () => RELAY_PEER ? vl.node.getConnections().filter(c => c.remotePeer.toString() === RELAY_PEER) : []
+const currentCircuit = () => vl.advertiseMultiaddrs().find(m => m.includes('p2p-circuit')) ?? ''
+
+let redialing = false
+let phantomStrikes = 0
+
+async function redialRelay(reason: string): Promise<void> {
+  if (redialing) return
+  redialing = true
+  try {
+    await Promise.allSettled(relayConnections().map(c => c.close()))
+    await vl.node.dial(multiaddr(RELAY))
+    console.log('[fed-sidecar] relay re-dial (' + reason + ')')
+  } catch (e) {
+    console.error('[fed-sidecar] relay re-dial failed:', String(e))
+  } finally {
+    redialing = false
+  }
+}
 
 const vl: VesselLibp2p = await createVesselLibp2p({ vesselId: VESSEL_ID, relayMultiaddr: RELAY, enableHttp: true })
 
@@ -119,8 +142,27 @@ Bun.serve({
 })
 
 async function register(): Promise<void> {
-  const cur = vl.advertiseMultiaddrs().find((m) => m.includes("p2p-circuit"))
-  if (cur) circuit = cur
+  circuit = currentCircuit()
+  const circuitList = circuit ? [circuit] : []
+  
+  // Phantom-reservation detection: if no circuit or no relay connection, trigger re-dial.
+  if (!circuit || relayConnections().length === 0) {
+    phantomStrikes = 0
+    void redialRelay('circuit empty / relay connection gone')
+  } else {
+    // Count live circuit-backed peers.
+    const circuitPeers = vl.node.getConnections().filter(c => c.remoteAddr?.toString().includes('p2p-circuit'))
+    if (circuitPeers.length === 0) {
+      phantomStrikes++
+      if (phantomStrikes >= 2) {
+        phantomStrikes = 0
+        void redialRelay('phantom-reservation suspicion: reservation claims valid but no circuit peers for 2 ticks')
+      }
+    } else {
+      phantomStrikes = 0
+    }
+  }
+
   try {
     const r = await fetch(DISCOVERY + '/register', {
       method: 'POST',
@@ -137,7 +179,7 @@ async function register(): Promise<void> {
         auth_scheme: 'none',
         protocol: 'libp2p',
         libp2p_peer_id: vl.peerId,
-        libp2p_multiaddr: circuit ? [circuit] : [],
+        libp2p_multiaddr: circuitList,
         ...(SYSTEM_VESSEL ? { systemVessel: true } : {}),
       }),
     })
