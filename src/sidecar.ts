@@ -62,6 +62,17 @@ if (!RELAY) {
 }
 if (!RELAY) die('set RELAY_MULTIADDR, or DISCOVERY_URL must expose relay_multiaddrs via /bootstrap')
 
+// Guard against unhandled libp2p errors (e.g. relay dial TimeoutError → ERR_UNHANDLED_ERROR).
+// Mirror of federation-transport-server.ts guards.
+process.on('uncaughtException', (err) => {
+  console.error('[fed-sidecar] uncaught exception:', err)
+  process.exit(1)
+})
+process.on('unhandledRejection', (reason) => {
+  console.error('[fed-sidecar] unhandled rejection:', reason)
+  process.exit(1)
+})
+
 const vl: VesselLibp2p = await createVesselLibp2p({ vesselId: VESSEL_ID, relayMultiaddr: RELAY, enableHttp: true })
 
 // Serve resolves over libp2p-HTTP by proxying each pointer to the local vessel's
