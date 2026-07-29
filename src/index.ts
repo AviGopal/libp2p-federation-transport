@@ -99,6 +99,8 @@ async function sendAll(stream: any, bytes: Uint8Array): Promise<void> {
 // to the peer, not its discovery URL).
 export const RESOLVE_PROTO = '/substrate/resolve/1.0.0'
 
+
+
 /** Serve cross-substrate resolution: handler(pointer) -> content, over RESOLVE_PROTO. */
 export async function serveResolve(vl: VesselLibp2p, handler: (pointer: any) => Promise<any> | any): Promise<void> {
   // resolve is a tiny request/response — allow it over relay-routed (limited)
@@ -268,6 +270,7 @@ export async function createVesselLibp2p(opts: VesselLibp2pOptions): Promise<Ves
     transports: [tcp(), webSockets(), circuitRelayTransport()],
     connectionEncrypters: [noise()],
     streamMuxers: [yamux()],
+    connectionMonitor: { abortConnectionOnPingFailure: false },
     // The service map is assembled dynamically (optional dcutr/http/extras), so its
     // static type is Record<string, unknown>; libp2p validates factories at runtime.
     services: services as any,
