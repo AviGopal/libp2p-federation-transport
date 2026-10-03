@@ -39,6 +39,7 @@ import { createLibp2p, type Libp2p } from 'libp2p'
 import { tcp } from '@libp2p/tcp'
 import { webSockets } from '@libp2p/websockets'
 import { noise } from '@chainsafe/libp2p-noise'
+import { asCrypto, defaultCrypto } from '@chainsafe/libp2p-noise/crypto'
 import { yamux } from '@chainsafe/libp2p-yamux'
 import { identify } from '@libp2p/identify'
 import { circuitRelayTransport } from '@libp2p/circuit-relay-v2'
@@ -268,7 +269,7 @@ export async function createVesselLibp2p(opts: VesselLibp2pOptions): Promise<Ves
     privateKey,
     addresses: { listen },
     transports: [tcp(), webSockets(), circuitRelayTransport()],
-    connectionEncrypters: [noise()],
+    connectionEncrypters: [noise({ crypto: { ...defaultCrypto, chaCha20Poly1305Encrypt: asCrypto.chaCha20Poly1305Encrypt, chaCha20Poly1305Decrypt: asCrypto.chaCha20Poly1305Decrypt } })],
     streamMuxers: [yamux()],
     connectionMonitor: { abortConnectionOnPingFailure: false },
     // The service map is assembled dynamically (optional dcutr/http/extras), so its
