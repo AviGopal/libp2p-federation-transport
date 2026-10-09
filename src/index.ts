@@ -50,6 +50,7 @@ import { generateKeyPairFromSeed } from '@libp2p/crypto/keys'
 import { peerIdFromString } from '@libp2p/peer-id'
 import { multiaddr, type Multiaddr } from '@multiformats/multiaddr'
 import { createHash } from 'node:crypto'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { Uint8ArrayList } from 'uint8arraylist'
 import { fromString as u8FromString, toString as u8ToString } from 'uint8arrays'
 
@@ -100,10 +101,20 @@ async function sendAll(stream: any, bytes: Uint8Array): Promise<void> {
 // to the peer, not its discovery URL).
 export const RESOLVE_PROTO = '/substrate/resolve/1.0.0'
 
+/**
+ * Who sent an inbound resolve, as the connection saw it. Passed as an OPTIONAL second
+ * argument, so a `(pointer) => …` handler is unaffected. `remotePeer` is the libp2p peer
+ * id of the connection the request arrived on (Noise-authenticated: the peer holds that
+ * key), or undefined when the transport could not surface it.
+ */
+export interface ResolveContext {
+  remotePeer?: string
+  transport: 'lpstream' | 'http'
+}
+export type ResolveHandler = (pointer: any, ctx?: ResolveContext) => Promise<any> | any
 
-
-/** Serve cross-substrate resolution: handler(pointer) -> content, over RESOLVE_PROTO. */
-export async function serveResolve(vl: VesselLibp2p, handler: (pointer: any) => Promise<any> | any): Promise<void> {
+/** Serve cross-substrate resolution: handler(pointer, ctx) -> content, over RESOLVE_PROTO. */
+export async function serveResolve(vl: VesselLibp2p, handler: ResolveHandler): Promise<void> {
   // resolve is a tiny request/response — allow it over relay-routed (limited)
   // connections so the symmetric-NAT case (no DCUtR upgrade) still works.
   // node.handle() is async in libp2p v3 — MUST await or the protocol isn't registered.
@@ -111,11 +122,11 @@ export async function serveResolve(vl: VesselLibp2p, handler: (pointer: any) => 
   // args, NOT `({ stream })`. The prior `({ stream })` destructure read `.stream` off
   // the stream object (undefined) → the handler never read the request → both sides
   // hung. This 2-arg form is THE fix for the resolve-e2e hang.
-  await vl.node.handle(RESOLVE_PROTO, (stream: any, _connection: any) => {
+  await vl.node.handle(RESOLVE_PROTO, (stream: any, connection: any) => {
     void (async () => {
       try {
         const pointer = JSON.parse(await readFrame(stream))   // read request (framed)
-        const content = await handler(pointer)
+        const content = await handler(pointer, { remotePeer: connection?.remotePeer?.toString(), transport: 'lpstream' })
         await sendAll(stream, frame(JSON.stringify({ content, metadata: { shape: pointer?.type } })))
         await stream.close()
       } catch { try { stream.abort?.(new Error('resolve handler error')) } catch {} }
@@ -149,9 +160,14 @@ export async function resolveViaLibp2p(vl: VesselLibp2p, target: string, pointer
 export const RESOLVE_HTTP_PROTO = '/substrate/resolve-http/1.0.0'
 export const RESOLVE_HTTP_PATH = '/v2/impulses/resolve'
 const HTTP_LIBP2P_PROTOCOL = '/http/1.1'
+// The Fetch-style route handler receives only a Request, which carries no peer. The
+// remote peer is known one layer down, where the /http/1.1 stream handler gets
+// (stream, connection); @libp2p/http awaits onStream -> onRequest -> route handler in
+// one chain, so an AsyncLocalStorage set around that stream handler is visible here.
+const httpRemotePeer = new AsyncLocalStorage<string | undefined>()
 
 /** Serve cross-substrate resolution as an HTTP POST handler over libp2p. */
-export async function serveResolveHttp(vl: VesselLibp2p, handler: (pointer: any) => Promise<any> | any): Promise<void> {
+export async function serveResolveHttp(vl: VesselLibp2p, handler: ResolveHandler): Promise<void> {
   const httpSvc: any = (vl.node.services as any).http
   if (httpSvc == null) throw new Error('http() service not enabled on this vessel — pass enableHttp:true')
   httpSvc.handle(RESOLVE_HTTP_PROTO, {
@@ -160,7 +176,7 @@ export async function serveResolveHttp(vl: VesselLibp2p, handler: (pointer: any)
     handler: async (req: Request): Promise<Response> => {
       try {
         const pointer = req.method === 'POST' ? await req.json() : { type: 'federation_probe' }
-        const content = await handler(pointer?.impulse ?? pointer)
+        const content = await handler(pointer?.impulse ?? pointer, { remotePeer: httpRemotePeer.getStore(), transport: 'http' })
         return new Response(JSON.stringify({ content, metadata: { shape: (pointer?.impulse ?? pointer)?.type } }), {
           status: 200, headers: { 'content-type': 'application/json' },
         })
@@ -173,13 +189,18 @@ export async function serveResolveHttp(vl: VesselLibp2p, handler: (pointer: any)
   // flag so the HTTP server also fires over a relayed connection. The http service has
   // already registered /http/1.1 without it; we cannot easily reach its private
   // onStream, so this is a no-op when the handler can't be rebound — direct connections
-  // are unaffected (they aren't limited).
+  // are unaffected (they aren't limited). The rebound handler also records the
+  // connection's remote peer for the route handler above; it is rebound even when the
+  // limited flag was already set, which changes nothing else (same handler, same options).
   try {
     const reg: any = (vl.node as any).components?.registrar ?? (vl.node as any).registrar
     const existing = reg?.getHandler?.(HTTP_LIBP2P_PROTOCOL)
-    if (existing?.handler && existing?.options?.runOnLimitedConnection !== true) {
+    if (existing?.handler) {
+      const inner = existing.handler
+      const withPeer = (stream: any, connection: any) =>
+        httpRemotePeer.run(connection?.remotePeer?.toString(), () => inner(stream, connection))
       await vl.node.unhandle(HTTP_LIBP2P_PROTOCOL)
-      await vl.node.handle(HTTP_LIBP2P_PROTOCOL, existing.handler, { ...existing.options, runOnLimitedConnection: true })
+      await vl.node.handle(HTTP_LIBP2P_PROTOCOL, withPeer, { ...existing.options, runOnLimitedConnection: true })
     }
   } catch { /* leave default registration in place; direct-conn path still works */ }
 }
