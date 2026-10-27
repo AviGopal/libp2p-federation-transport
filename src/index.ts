@@ -134,6 +134,29 @@ export async function serveResolve(vl: VesselLibp2p, handler: ResolveHandler): P
   }, { runOnLimitedConnection: true })
 }
 
+// A CIRCUIT DIAL WITH NO RELAY CONNECTION DIES ONE HOUR AFTER THE FIRST ONE. With no open
+// connection to the relay, the circuit transport merges the relay's address into the peer
+// store and then dials the relay BY PEER ID. The peer store keeps the first `observed`
+// time of an address it already holds and drops addresses older than maxAddressAge (1 h),
+// while each merge keeps the record itself alive. So from an hour after the first circuit
+// dial, every dial through that relay fails with "no valid addresses for peer <relay>"
+// until the process restarts. Measured on a direct-only node: its federated LLM fallback
+// to the hub's arms failed this way 99 times in one boot. A node holding a standing relay
+// connection never hits it, because the transport reuses that connection.
+// Dialing the relay by MULTIADDR first uses the address given (the dial queue reads the
+// peer store only when no address is passed), so the circuit dial that follows reuses it.
+async function connectToCircuitRelay(node: Libp2p, target: string): Promise<void> {
+  const at = target.indexOf('/p2p-circuit')
+  if (at <= 0) return
+  const relayAddr = multiaddr(target.slice(0, at))
+  // multiaddr v13 has no getPeerId(): the relay is the last /p2p/ component before the circuit.
+  const relayPeer = relayAddr.getComponents().filter((c) => c.name === 'p2p').pop()?.value
+  if (relayPeer == null) return
+  if (node.getConnections().some((c) => c.remotePeer.toString() === relayPeer)) return
+  // A failed relay dial is left to the circuit dial below, which reports its own error.
+  try { await node.dial(relayAddr) } catch { /* surfaced by the circuit dial */ }
+}
+
 /**
  * Dial a peer and resolve a pointer over libp2p (lpStream-corrected path).
  * Accepts a multiaddr string OR a PeerId string — dialing by PeerId lets libp2p
@@ -141,6 +164,7 @@ export async function serveResolve(vl: VesselLibp2p, handler: ResolveHandler): P
  */
 export async function resolveViaLibp2p(vl: VesselLibp2p, target: string, pointer: any): Promise<any> {
   const dialTarget = target.startsWith('/') ? multiaddr(target) : peerIdFromString(target)
+  if (target.startsWith('/')) await connectToCircuitRelay(vl.node, target)
   const stream = await vl.node.dialProtocol(dialTarget as any, RESOLVE_PROTO, { runOnLimitedConnection: true })
   await sendAll(stream, frame(JSON.stringify(pointer)))    // send request, keep reading for response
   const res = JSON.parse(await readFrame(stream))
